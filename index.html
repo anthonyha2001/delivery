@@ -119,6 +119,10 @@
   .seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:#fff}
   .seg:focus{outline:2px solid #2dd4bf;outline-offset:1px}
   #qPaid{white-space:nowrap}
+  .qmem{display:block;font-size:11px;color:var(--brand);font-weight:600;white-space:nowrap;margin-top:2px}
+  .qmem.new{color:var(--muted);font-weight:500}
+  .seg.auto{animation:autoPulse 1.2s ease-out}
+  @keyframes autoPulse{0%{box-shadow:0 0 0 3px #2dd4bf}100%{box-shadow:0 0 0 3px transparent}}
   .seg button{border:0;border-right:1px solid var(--line);background:none;padding:6px 7px;font:inherit;font-size:12px;cursor:pointer;white-space:nowrap;color:var(--ink)}
   .seg button:last-child{border-right:0}
   .seg button.on{background:var(--brand);color:#fff}
@@ -228,7 +232,7 @@
       <label class="grow">Search<input id="fSearch" placeholder="Name, phone, area…"></label>
     </div>
     <div class="summary" id="ordersSummary"></div>
-    <div class="keys-hint">Customer → <kbd>Enter</kbd> → driver → <kbd>Enter</kbd> → amount → <kbd>Enter</kbd> saves the order. Driver, platform and payment stay as last used.
+    <div class="keys-hint">Customer → <kbd>Enter</kbd> → driver → <kbd>Enter</kbd> → amount → <kbd>Enter</kbd> saves the order. Payment and platform are filled from the customer's last order.
       &nbsp;·&nbsp; <kbd>Esc</kbd> then <kbd>↑</kbd><kbd>↓</kbd> move in the list, <kbd>←</kbd><kbd>→</kbd> change day &nbsp;·&nbsp; <kbd>?</kbd> all shortcuts</div>
     <div class="card table-wrap">
       <table class="tbl">
@@ -906,7 +910,13 @@ function updateCustHint(){
 }
 oForm.customer.addEventListener('input', updateCustHint);
 $('#newOrderBtn').onclick = () => focusQuick();
-const dlgPicked = c => { oForm.customer._cust = c; oForm.customer.value = custLabel(c); updateCustHint(); oForm.amount.focus(); };
+function dlgMemory(c){
+  if(editingOrder || !c) return;
+  const last = lastOrderOf(c); if(!last) return;
+  if(PLATFORMS.includes(last.platform)) oForm.platform.value = last.platform;
+  if(PAYMENTS.includes(last.payment)) oForm.payment.value = last.payment;
+}
+const dlgPicked = c => { oForm.customer._cust = c; oForm.customer.value = custLabel(c); updateCustHint(); dlgMemory(c); oForm.amount.focus(); };
 $('#quickCust').onclick = () => openCustomer(null, dlgPicked, prefillFrom(oForm.customer.value.trim()));
 
 oForm.addEventListener('submit', e => {
@@ -1287,16 +1297,49 @@ function attachAC(input, onPick, onCreate){
   window.addEventListener('scroll', e => { if(e.target !== box) hide(); }, true);
   window.addEventListener('resize', hide);
 }
-attachAC(oForm.customer, () => { updateCustHint(); oForm.amount.focus(); },
+attachAC(oForm.customer, c => { updateCustHint(); dlgMemory(c); oForm.amount.focus(); },
   t => openCustomer(null, dlgPicked, prefillFrom(t)));
 
 /* ================= QUICK ORDER ROW ================= */
 const qCust = $('#qCust'), qDriver = $('#qDriver'), qAmount = $('#qAmount'), qPaid = $('#qPaid');
 let qIsPaid = false;
 function focusQuick(){ if(currentPage !== 'orders') go('orders'); qCust.focus(); qCust.select(); }
+// ---- customer memory: their most recent order ----
+function lastOrderOf(c){
+  let best = null;
+  for(const o of db.orders){
+    if(o.customerId !== c.id) continue;
+    if(!best || o.date > best.date || (o.date === best.date && (o.created||0) > (best.created||0))) best = o;
+  }
+  return best;
+}
+function daysAgo(d){
+  const n = Math.round((new Date(today()+'T00:00:00') - new Date(d+'T00:00:00')) / 864e5);
+  return n <= 0 ? 'today' : n === 1 ? 'yesterday' : n + ' days ago';
+}
+// most used payment / platform in the shop (for customers with no history)
+function shopDefaults(){
+  const cnt = (f, dflt) => { const m = {}; db.orders.forEach(o => m[o[f]] = (m[o[f]]||0) + 1); return Object.entries(m).sort((x,y) => y[1]-x[1])[0]?.[0] || dflt; };
+  return {payment:cnt('payment', 'Cash'), platform:cnt('platform', 'WhatsApp')};
+}
+const shortPay = p => ({'Credit Card':'Card', 'On Account':'Account'}[p] || p);
+const shortPlat = p => p === 'Application' ? 'App' : p;
+function applyMemory(c){
+  const last = lastOrderOf(c), area = $('#qArea');
+  const pick = last || shopDefaults();
+  if(PLATFORMS.includes(pick.platform)) db.last.platform = pick.platform;
+  if(PAYMENTS.includes(pick.payment))  db.last.payment  = pick.payment;
+  save(); drawPlat(); drawPay();
+  if(!last){
+    area.innerHTML = `${esc(c.area || '')}<span class="qmem new">New customer</span>`;
+    return;
+  }
+  ['#qPlat','#qPay'].forEach(sel => { const el = $(sel); el.classList.remove('auto'); void el.offsetWidth; el.classList.add('auto'); });
+  area.innerHTML = `${esc(c.area || '')}<span class="qmem" title="Last order: ${esc(fmtDate(last.date))} · ${esc(money(last.amount))} · ${esc(last.payment)} · ${esc(last.platform)}">Last: ${esc(shortPay(last.payment))} · ${esc(shortPlat(last.platform))} · ${daysAgo(last.date)}</span>`;
+}
 function pickQuick(c){
   qCust._cust = c; qCust.value = custLabel(c);
-  $('#qArea').textContent = c.area || '';
+  applyMemory(c);
   qDriver.focus();
 }
 function drawPaid(){ qPaid.className = 'status ' + (qIsPaid ? 'paid' : 'unpaid'); qPaid.textContent = qIsPaid ? 'Paid' : 'Unpaid'; }
@@ -1310,9 +1353,10 @@ function seg(el, vals, labels, field){
   el.addEventListener('mousedown', e => e.preventDefault());
   el.addEventListener('click', e => { const b = e.target.closest('button'); if(b){ db.last[field] = b.dataset.v; save(); draw(); refocusQuick(); } });
   draw();
+  return draw;
 }
-seg($('#qPlat'), PLATFORMS, ['App','WhatsApp'], 'platform');
-seg($('#qPay'), PAYMENTS, ['Cash','Online','Card','Account'], 'payment');
+const drawPlat = seg($('#qPlat'), PLATFORMS, ['App','WhatsApp'], 'platform');
+const drawPay  = seg($('#qPay'), PAYMENTS, ['Cash','Online','Card','Account'], 'payment');
 
 qDriver.addEventListener('keydown', e => {
   if(/^[1-9]$/.test(e.key)){ const d = db.drivers[+e.key-1]; if(d){ qDriver.value = d.id; db.last.driverId = d.id; save(); } e.preventDefault(); }
